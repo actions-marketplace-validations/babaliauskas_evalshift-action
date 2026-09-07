@@ -24,15 +24,15 @@ inputs:
   evalshift-version:
     description: EvalShift CLI version to install.
     required: false
-    default: "0.9.0"
+    default: "0.13.1"
   python-version:
     description: Python version for the EvalShift CLI.
     required: false
-    default: "3.14"
+    default: "3.12"
   fail-on:
-    description: "Gating mode: never, regression, or any-slice-regression."
+    description: "Gating mode: policy, never, regression, or any-slice-regression."
     required: false
-    default: regression
+    default: policy
   branch:
     description: Candidate branch override. Auto-detected when omitted.
     required: false
@@ -68,7 +68,9 @@ outputs:
     description: Hosted diff URL when a compatible baseline exists.
     value: ${{ steps.run.outputs.diff_url }}
   run_id:
-    description: EvalShift run id.
+    description: >-
+      Hosted EvalShift run id - the server-minted id every /runs/{id} API route takes.
+      Not the local r_... run directory name.
     value: ${{ steps.run.outputs.run_id }}
   regression_count:
     description: Number of regressed examples in the hosted diff.

@@ -2,14 +2,21 @@
 
 The EvalShift GitHub Action turns your golden suite into a **merge gate**. On every pull
 request it runs the suite against both models, pushes the result to hosted EvalShift, compares
-it to the latest run on your base branch, and fails the check when the diff shows a regression.
+it to the latest run on your base branch, and fails the check when your migration policy says
+the candidate is not safe to ship.
 
-- **Action ref:** `babaliauskas/evalshift-action@v0` · **version:** 0.1.0 · **License:** MIT
+- **Action ref:** `babaliauskas/evalshift-action@v0` · **version:** 0.3.0 · **License:** MIT
 - **Kind:** composite action — installs Python + the pinned EvalShift CLI, then runs a small
   stdlib-only helper script. Nothing is compiled, nothing is containerised.
-- **Pinned CLI:** `evalshift==0.9.0` by default, overridable.
-- **What it adds on top of the CLI:** hosted push, baseline lookup, cross-branch diff, one
-  self-updating PR comment, a commit status, and an exit code.
+- **Pinned CLI:** `evalshift==0.13.1` by default, overridable.
+- **What it adds on top of the CLI:** hosted push, baseline lookup, cross-branch diff, the
+  governed policy verdict, one self-updating PR comment, a commit status, and an exit code.
+
+> **Behaviour change — the default gate moved.** `fail-on` now defaults to `policy`: the exit
+> code follows hosted EvalShift's verdict on your project's migration policy, not the action's
+> own count of regressions in the diff. The two can disagree in both directions. Set
+> `fail-on: regression` to keep the previous behaviour. See
+> [Gating: the `fail-on` modes](#gating-the-fail-on-modes).
 
 ---
 
@@ -97,7 +104,7 @@ jobs:
       - uses: babaliauskas/evalshift-action@v0
         with:
           token: ${{ secrets.EVALSHIFT_TOKEN }}
-          fail-on: regression
+          fail-on: policy # the default; gates on your migration policy
 ```
 
 Keep the `push: branches: [main]` trigger. Pull requests need something to compare against, and
@@ -197,7 +204,9 @@ from should show up dead there within the grace window.
 ## Secrets and provider keys
 
 The action does **not** manage provider credentials. It passes the job environment through to
-the CLI unchanged, so set the key as a job-level `env:` entry and the CLI picks it up.
+the CLI, adding `EVALSHIFT_HOST`, `EVALSHIFT_TOKEN` and `COLUMNS=512` (the last so rich does
+not fold the hosted run URL across two lines) and touching nothing else, so set the key as a
+job-level `env:` entry and the CLI picks it up.
 
 | Provider  | Environment variable                 |
 | --------- | ------------------------------------ |
@@ -229,9 +238,9 @@ means a hung job.
 | `host` | no | `https://api.evalshift.dev` | Hosted API base URL. Set only for a self-hosted or staging deployment. |
 | `config` | no | `evalshift.yaml` | Path to your config, relative to the repository root. Paths *inside* the config (prompt files, tools) resolve relative to the config file's own directory, so a config in a subdirectory works. |
 | `suite` | no | `golden.jsonl` | Path to the golden JSONL suite, relative to the repository root. |
-| `evalshift-version` | no | `0.9.0` | Exact CLI version installed from PyPI. Pin this for run-to-run reproducibility across CLI releases. |
-| `python-version` | no | `3.14` | Python used to install and run the CLI. Must satisfy the CLI's minimum (3.14 for 0.9.0). |
-| `fail-on` | no | `regression` | Gating mode. See [below](#gating-the-fail-on-modes). |
+| `evalshift-version` | no | `0.13.1` | Exact CLI version installed from PyPI. Pin this for run-to-run reproducibility across CLI releases. |
+| `python-version` | no | `3.12` | Python used to install and run the CLI. Must satisfy the CLI's minimum (3.11 for 0.13.1). |
+| `fail-on` | no | `policy` | Gating mode. See [below](#gating-the-fail-on-modes). |
 | `branch` | no | auto | Candidate branch name recorded on the hosted run. Auto-detected from the PR head ref, else the pushed ref. |
 | `base-branch` | no | auto | Branch to look for a baseline run on. Auto-detected from the PR base ref, else the current ref. Resolving to empty means no baseline is fetched and the check always passes. |
 | `create-project` | no | `true` | Whether `evalshift push` may auto-create the hosted project when it doesn't exist. Set `false` to make a missing project a hard failure. |
@@ -249,9 +258,9 @@ Boolean inputs accept `1`, `true`, `yes`, `on` (case-insensitive). Anything else
 | ------ | ----- |
 | `run_url` | Hosted run URL for this run. |
 | `diff_url` | Hosted diff URL comparing this run to the baseline. Empty string when no compatible baseline was found. |
-| `run_id` | EvalShift run id, usable with `evalshift` CLI commands locally. |
+| `run_id` | Hosted EvalShift run id — the server-minted id every `/runs/{id}` API route takes. Not the local `r_…` run directory name. |
 | `regression_count` | Number of regressed examples in the hosted diff. `0` when there is no baseline. |
-| `conclusion` | `success` or `failure`, reflecting `fail-on`. |
+| `conclusion` | `success` or `failure`, reflecting `fail-on`. These are GitHub commit-status states, so a policy that *declined* to decide is `success` here — the PR comment and the status description carry the verdict itself. |
 
 Consume them from a later step:
 
@@ -272,9 +281,78 @@ job lacks permission to comment.
 
 | Mode | The job fails when |
 | ---- | ------------------ |
+| `policy` | Hosted EvalShift evaluates the run against the project's migration policy and answers `fail`. **Default.** |
 | `never` | Never. Records the run, pushes it, comments — but never blocks the merge. Use while you're still calibrating a suite. |
-| `regression` | The hosted diff reports one or more regressed examples in aggregate. **Default.** |
+| `regression` | The hosted diff reports one or more regressed examples in aggregate. |
 | `any-slice-regression` | Any slice's pass rate moved down, even when the aggregate is flat or improved. Stricter — catches one slice degrading while the overall number hides it. |
+
+### `policy` — the governed gate
+
+`policy` is the only mode that enforces what you configured. The action calls
+`GET /runs/{run-id}/policy-check` and follows the answer; it does not re-implement a single
+threshold. The same verdict is what the CLI and the web app show, so a merge blocked in CI is
+blocked for the same stated reason everywhere.
+
+That makes it disagree with `regression` in both directions, on purpose:
+
+- A run with regressed examples that still sits inside every budget **passes**. Under
+  `regression` it would have failed, and the honest reading is that your policy said this much
+  movement is acceptable.
+- A run whose aggregate regression count is `0` but which busts a cost, latency or per-slice
+  budget **fails**. `regression` never saw that question.
+
+The response also carries the arithmetic — each budget's observed value, its allowance, its
+scope, and whether the measurement was conclusive — and every blocking regression behind the
+verdict. Both are rendered into the PR comment, so the check explains itself without a trip to
+the web app.
+
+#### The four statuses
+
+`policy-check` answers with a closed set of four. Exactly one of them fails the job.
+
+| `status` | `should_fail` | Rendered as |
+| -------- | ------------- | ----------- |
+| `pass` | `False` | A clean pass. No caveat blockquote. |
+| `conditional_pass` | `False` | A pass, with a caveat blockquote and the server's reason. |
+| `fail` | `True` | A failure, with the busted budgets and blocking regressions. |
+| `inconclusive` | `False` | Undecided — explicitly *not* a pass. |
+
+**`conditional_pass` is a pass.** Every budget held and nothing critical or high regressed, but
+something milder did: medium/low regressions, and/or comparisons that scored zero pairs. The
+server says so in its own reason — which contains *"not a gate failure"* and ends *"Review
+before merging."* — and the action passes that through verbatim. It does not fail the gate, and
+it is not treated as undecided: the check is green, with a blockquote saying the run is not
+clean and pointing at the reason.
+
+**`inconclusive` has six distinct causes**, carried only by the `reason` string:
+
+1. no policy is configured on the project — there were no budgets to check, and
+   `policy` is `null` with `budgets: []`;
+2. no policy metrics were recorded for the run at all;
+3. nothing was measured — no blocking evaluator scored a single record, so the quality
+   budgets are clean by absence rather than by evidence;
+4. nothing was comparable — every comparison scored severity `insufficient`;
+5. a budget was breached, but on too small a sample to confirm the breach;
+6. a slice your policy declares was not measured by this run.
+
+The action never substitutes its own wording for these. It prints the server's `reason`
+verbatim in the PR comment, because paraphrasing would collapse six different problems — and
+six different fixes — into one sentence on the surface you actually read. It is also why the
+list growing (it went from three to six when the gate stopped inventing a default policy)
+changes nothing the action has to ship: it never enumerated them in code.
+
+**When the policy declines to answer.** `inconclusive` — and any status outside the four above,
+which a newer server may return to an older pinned action — **does not fail the job**, and is
+never presented as a pass. The comment and the commit-status description say the gate did not
+decide. The `conclusion` output stays `success`, because it is a GitHub commit-status state and
+there is no third value; read the comment, not the output, when you care about the difference.
+
+**When the policy check is unavailable.** If it errors, 404s, or has no stored decision for the
+run, the action falls back to `regression` gating for that run and announces it in the job log,
+the commit-status description, and the PR comment. It does not silently go green — but for that
+run the gate is the diff, not your policy.
+
+### The diff-only modes
 
 `any-slice-regression` is not simply "stricter than `regression`" in every case; it's a
 different question. A run where the aggregate regression count is above zero but no individual
@@ -282,12 +360,15 @@ slice moved down will fail under `regression` and pass under `any-slice-regressi
 want both guarantees, run the action twice with different modes (and `comment: "false"` on one
 of them), or keep `regression` and rely on slices for diagnosis rather than gating.
 
-**Suggested progression:** start at `never` for a week or two while the suite settles, move to
-`regression` once the signal is trustworthy, and adopt `any-slice-regression` only when you have
-slices you genuinely care about individually — a safety slice, a high-value customer segment.
+**Suggested progression:** start at `never` for a week or two while the suite settles, then move
+to `policy` and tune the budgets in the web app until the gate agrees with your own judgement of
+which PRs should have been blocked. Reach for `regression` or `any-slice-regression` only when
+you deliberately want a diff-shaped question the policy doesn't ask.
 
 When no compatible baseline run exists on the base branch, there's nothing to compare against:
-the check passes, `regression_count` is `0`, and the PR comment says so explicitly.
+the diff-based modes pass, `regression_count` is `0`, and the PR comment says so explicitly.
+`policy` still asks the server for a verdict — the policy is about this run, not about the
+comparison.
 
 ---
 
@@ -304,6 +385,22 @@ itself on every push instead of stacking up. With a baseline present it looks li
 > **Hosted run:** [open run](https://app.evalshift.dev/…)
 > **Regressions:** 3
 > **Diff:** [compare to baseline](https://app.evalshift.dev/…)
+> **Policy decision:** `fail` (from `project_policy`)
+> **Why:** pass-rate drop of 4.2 pts exceeds the allowed 2.0 pts
+>
+> ### Policy budgets
+>
+> | Budget | Scope | Observed | Allowed | Result |
+> | --- | --- | ---: | ---: | --- |
+> | pass_rate_drop | overall | 0.042 | 0.02 | fail |
+> | cost_increase | overall | 0.1 | 0.25 | pass (not confident) |
+>
+> ### Blocking regressions
+>
+> | Prompt | Evaluator | Slice | Severity | Score delta |
+> | --- | --- | --- | --- | ---: |
+> | p-refund | accuracy | safety_refusals | critical | -0.4 |
+>
 > **Pass-rate movement:** -12 pts
 >
 > | Slice | Pass-rate delta |
@@ -311,12 +408,32 @@ itself on every push instead of stacking up. With a baseline present it looks li
 > | safety_refusals | -25 pts |
 > | tool_selection | -8 pts |
 
+The two policy sections appear under `fail-on: policy` only; the other modes never ask for a
+verdict, so there is nothing honest to render.
+
+Budgets are listed failing-first and capped at 12 rows, blocking regressions at 10, with a
+line naming how many were omitted — a policy with a per-slice budget for fifty slices should not
+bury the diff under its own table. Each row names the `scope` it was judged at: `overall`, or
+the slice name for a per-slice budget, so one budget name evaluated across ten slices still
+reads unambiguously. When the cap hides failing budgets, the omission line says how many
+(*"8 more budgets not shown, 8 of them failing"*) — with per-slice budgets there can be more
+failures than fit, and a bare count would read as "the rest were fine". `pass (not confident)`
+marks a budget the server reported as `conclusive: false`: the measurement was too noisy to
+tell, and rendering it as a clean pass would be a lie of omission.
+
+A run where nothing was comparable comes back with `budgets: []` and `status: "inconclusive"`.
+Both tables are then omitted entirely rather than rendered empty, and the server's reason is
+what the reader gets instead.
+
+A blockquote above the tables states the caveat on a `conditional_pass`, and states plainly
+when the policy could not decide or when the policy check could not be reached.
+
 Up to five regressed slices are listed, worst first. When nothing regressed you get a single
 `No regressed slices` row. Percentages are rounded for display only — gating uses the raw
 values, so a slice can appear as `0 pts` and still count as a regression.
 
-Without a baseline, the table is replaced by a single line: *No compatible baseline run was
-found on the base branch.*
+Without a baseline, the slice table is replaced by a single line: *No compatible baseline run
+was found on the base branch.* The policy sections still render.
 
 ### A commit status
 
@@ -357,8 +474,12 @@ the action logs a warning and carries on rather than failing the run — the gat
    "Compatible" is a server-side judgement — a suite that changed shape can't be diffed against
    an older one.
 6. **Fetch the diff.** Pulls aggregate and per-slice deltas from the hosted API.
-7. **Report.** Writes the five outputs, upserts the PR comment, sets the commit status.
-8. **Gate.** Exits non-zero when `fail-on` says the diff is a regression.
+7. **Ask the policy gate.** Under `fail-on: policy`, `GET /runs/{id}/policy-check` returns the
+   server's verdict on this run against the project's migration policy, with the budget-by-budget
+   arithmetic behind it. Skipped in the other modes.
+8. **Report.** Writes the five outputs, upserts the PR comment, sets the commit status.
+9. **Gate.** Exits non-zero when the gate says so — the policy verdict under `fail-on: policy`,
+   the diff otherwise.
 
 The action is a wrapper, not a reimplementation. All evaluation and statistics happen in the
 CLI; all cross-branch diffing happens server-side. If you want to understand what
@@ -429,8 +550,9 @@ config pointed at with `config:`.
 
 ## Plan limits and the CI preflight
 
-Hosted EvalShift plans limit a few things that CI runs into: private-repo CI, runs per month,
-and how many runs an org may have in flight at once. Discovering one of those halfway through a
+Hosted EvalShift plans limit a few things that CI runs into: runs per month and how many runs
+an org may have in flight at once. (Private-repo CI is included on every plan; the preflight
+still reports the repository's visibility.) Discovering one of those halfway through a
 suite means paying for the model calls and getting nothing, so the action asks first.
 
 **What it does, before installing anything of yours or spending a credit:**
@@ -589,17 +711,29 @@ Worth knowing before you rely on this in anger:
   first being updated.
 - **The comment marker and status context are global constants.** Parallel invocations on the
   same PR overwrite each other. One commenting invocation per PR.
-- **The run id is the newest directory under `.evalshift/runs`.** If a step between the run and
-  the push touches an older run directory's mtime, the wrong run gets pushed. In a normal
-  workflow this never happens.
-- **The hosted run URL is parsed from CLI stdout.** A CLI release that changes how the push
-  result is printed would break this. The repo's `cli-contract` CI job guards flag renames but
-  not output shape.
+- **The run that gets pushed is the newest directory under `.evalshift/runs`.** If a step
+  between the run and the push touches an older run directory's mtime, the wrong run gets
+  pushed. In a normal workflow this never happens.
+- **The hosted run URL is parsed from CLI stdout, and the hosted run id is read out of its
+  `/app/{org}/{project}/runs/<uuid>` path.** The action anchors that whole shape, so a change
+  to either how the push result is printed or how the web app routes runs would break it. The
+  repo's `cli-contract` CI job guards flag renames but not output shape; a URL the action
+  cannot read a run id out of fails the step rather than gating on a guess.
 - **No retries on hosted API calls.** A 30-second timeout, one attempt. A transient hosted
   outage fails the step rather than silently passing — deliberate, but it means a flaky network
   reads as a failed job.
 - **`fail-on` decides the exit code, not whether the run happened.** Even at `never`, the run
   executes, costs money, and pushes.
+- **A policy that cannot decide does not fail the job.** `inconclusive` — and any status
+  outside the four the server defines, which a newer server could return to an older pinned
+  action — is reported loudly and gated as a non-failure. If you want undecided to block a
+  merge, that is a policy change on the server, not an action input.
+- **`conditional_pass` merges.** It is a pass by design, not a near-miss the action rounds
+  down. The check goes green, the comment carries the caveat, and nothing stops the merge. If
+  medium/low regressions should block, tighten the policy server-side — the action will not
+  second-guess the verdict it was given.
+- **An unreachable policy check degrades to `regression`.** The action says so in three places
+  rather than going quietly green, but for that run the gate is the diff, not your policy.
 - **The plan preflight reads `project:` with a regex, not a YAML parser.** The runtime helper
   has no dependencies. A top-level `project: org/name` is found; anything more exotic isn't,
   and the preflight is skipped rather than guessed at. The server still enforces the limit at
@@ -630,6 +764,14 @@ that redirects run artifacts elsewhere, or a working-directory mismatch.
 
 The push didn't emit a URL on its last output line. Run `evalshift push <run-id>` locally
 against the same host and see what it prints. Also check for a CLI version mismatch.
+
+### `could not read a server run id out of the hosted run URL: ...`
+
+The push printed a URL, but the action could not find an `/app/{org}/{project}/runs/<uuid>`
+path in it. Every hosted call afterwards is keyed on that id, so the action stops rather than
+gate on a guess. Usually a CLI version mismatch — an older CLI printed the local `r_…` run
+directory name in the URL instead of the server-minted id. Check the printed URL in the step
+log and pin a newer `evalshift-version`.
 
 ### HTTP 401 from the hosted API
 
@@ -663,7 +805,8 @@ gating still works — only the comment is lost.
 
 The [CI preflight](#plan-limits-and-the-ci-preflight) got a `402`: the org's plan doesn't cover
 this run. The annotation and the step summary name the limit and link to the billing page. The
-usual cause is private-repo CI on a Free plan. Nothing was run and nothing was charged.
+usual causes are the monthly run quota and the parallelism cap. Nothing was run and nothing
+was charged.
 
 ### `warning: plan preflight skipped: ...`
 
@@ -672,10 +815,21 @@ causes: the project doesn't exist on hosted EvalShift yet (the first push create
 token lacks `project:read`, or hosted EvalShift is unreachable. The server still enforces plan
 limits when the run is uploaded, so this warning never means a limit was bypassed.
 
+### `warning: hosted policy check ...; falling back to fail-on: regression`
+
+Under `fail-on: policy` the action could not get a verdict for this run — the endpoint errored,
+answered `404`, or holds no stored decision for the run. The job still gated, but on the diff
+rather than on your policy, and the PR comment carries the same warning. A persistent `404` on
+runs that *do* exist usually means the project has no migration policy configured, so there is
+nothing for the server to decide against.
+
 ### The check is always green
 
-In order of likelihood: no baseline run exists on the base branch yet (add the `push` trigger to
-`main` and merge once), `fail-on` is `never`, or `base-branch` resolved to an empty string.
+In order of likelihood: under the default `fail-on: policy`, the project's migration policy is
+permissive enough that nothing has busted a budget yet (the comment shows the budget arithmetic —
+if every row passes with room to spare, tighten them in the web app); no baseline run exists on
+the base branch yet (add the `push` trigger to `main` and merge once); `fail-on` is `never`; or
+`base-branch` resolved to an empty string.
 
 ### Two EvalShift comments on one PR
 
@@ -687,9 +841,9 @@ the comments API on a long thread.
 It doesn't — output is buffered per command and printed when each finishes. A slow suite is
 silent while it runs.
 
-### `pip install evalshift==0.9.0` fails
+### `pip install evalshift==0.13.1` fails
 
-`python-version` is below the CLI's minimum. EvalShift 0.9.0 needs Python 3.14+.
+`python-version` is below the CLI's minimum. EvalShift 0.13.1 needs Python 3.11+.
 
 ### Costs are higher than expected
 
@@ -700,15 +854,37 @@ CI suite, or swap LLM-judge evaluators for structural ones in a CI-specific conf
 
 ## Versioning and stability
 
-Pin to `@v0` to track the latest v0.x, or to an exact tag such as `@v0.1.0` for a fully
+Pin to `@v0` to track the latest v0.x, or to an exact tag such as `@v0.3.0` for a fully
 reproducible workflow. The `evalshift-version` input pins the CLI separately — pin both if you
 want a workflow that behaves identically six months from now.
 
 This repo's CI includes a `cli-contract` job that installs the exact pinned CLI version and
-asserts the command-line surface the action depends on still exists. It costs nothing (no API
-keys, no model credits) and it's the early-warning system for CLI drift. A separate manual
-`dogfood` workflow exercises the whole path — install, run, hosted push, baseline lookup,
-outputs — against a four-example fixture project; it's manual because it spends real credits.
+runs `scripts/cli_contract.sh` to assert the command-line surface the action depends on still
+exists. It costs nothing (no API keys, no model credits) and it's the early-warning system for
+CLI drift. A separate manual `dogfood` workflow exercises the whole path — install, run, hosted
+push, baseline lookup, outputs — against a four-example fixture project; it's manual because it
+spends real credits.
+
+The `evalshift-version` default in `action.yml` is the single source of truth for the pinned
+CLI. Every other mention (README, this document, `llms-full.txt`) is asserted equal by
+`tests/test_pin_consistency.py`, and `scripts/bump_cli_pin.py <new-version>` rewrites all of
+them plus the action's patch version in `pyproject.toml`. The pin is kept current by
+`.github/workflows/bump-cli-pin.yml`: it runs daily (polling PyPI for the latest release), on
+`workflow_dispatch` with an optional `version` input, or on `repository_dispatch` of type
+`evalshift-cli-release`. Before opening anything it checks the target's `requires-python`
+against the `python-version` default, installs the target CLI and runs the contract script, then
+runs the bump script and the test suite; only then does it open a PR on branch
+`bump/evalshift-<version>` titled `chore(pin): evalshift <old> → <new>`. The optional
+`BUMP_PR_TOKEN` secret (a fine-grained PAT with `contents` and `pull-requests` write) lets the
+normal CI run on that PR — a PR opened with `GITHUB_TOKEN` does not trigger `ci.yml`; without the
+secret the PR still opens, pre-validated.
+
+Merging a PR that bumps `version` in `pyproject.toml` *is* the release — there are no manual
+tags. On every push to `main`, `.github/workflows/release.yml` creates `v<version>` on the merge
+commit if it does not exist yet, force-moves the floating `v0` tag to the same commit (only `v0`
+is ever moved), and publishes a GitHub Release with generated notes since the previous `v0.*`
+tag; ordinary merges stop green. So a merged bump PR reaches every `@v0` consumer immediately.
+The workflow refuses a major other than `0` — a 1.x release needs a `v1` tag and a docs change.
 
 The action is MIT licensed. The EvalShift CLI it installs is licensed separately
 (AGPL-3.0-or-later).
@@ -732,8 +908,9 @@ to hosted EvalShift. It never uploads provider API keys. If your suite contains 
 production data, that's the thing to weigh.
 
 **Why did the check pass when the report clearly shows a regression?**
-Two common reasons. `fail-on: never` is set, or there was no compatible baseline so nothing was
-compared. The comment states which.
+Three common reasons. The default `fail-on: policy` gates on your migration policy, and a
+regression that stays inside its budgets is a pass by design; `fail-on: never` is set; or there
+was no compatible baseline so nothing was compared. The comment states which.
 
 **Can I run it on a schedule instead of on PRs?**
 Yes — it works on any trigger. On non-PR events you get the commit status and the outputs but no
