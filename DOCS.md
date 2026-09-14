@@ -5,7 +5,7 @@ request it runs the suite against both models, pushes the result to hosted EvalS
 it to the latest run on your base branch, and fails the check when your migration policy says
 the candidate is not safe to ship.
 
-- **Action ref:** `babaliauskas/evalshift-action@v0` · **version:** 0.3.0 · **License:** MIT
+- **Action ref:** `babaliauskas/evalshift-action@v0` · **version:** 0.3.2 · **License:** MIT
 - **Kind:** composite action — installs Python + the pinned EvalShift CLI, then runs a small
   stdlib-only helper script. Nothing is compiled, nothing is containerised.
 - **Pinned CLI:** `evalshift==0.14.1` by default, overridable.
