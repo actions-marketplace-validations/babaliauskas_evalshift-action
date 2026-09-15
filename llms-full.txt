@@ -671,4 +671,4 @@ The `evalshift-version` default in `action.yml` is the single source of truth fo
 `bump/evalshift-<version>`; the optional `BUMP_PR_TOKEN` secret lets CI run on that PR.
 Merging a `pyproject.toml` version bump is the release: `release.yml` tags `v<version>` and moves
 `v0` to the merge commit, so every `@v0` consumer gets the new pin on merge. No manual tags.
-License: MIT (the EvalShift CLI it installs is licensed separately, AGPL-3.0-or-later).
+License: MIT (the EvalShift CLI it installs is licensed separately, Apache-2.0).
