@@ -887,7 +887,7 @@ tag; ordinary merges stop green. So a merged bump PR reaches every `@v0` consume
 The workflow refuses a major other than `0` — a 1.x release needs a `v1` tag and a docs change.
 
 The action is MIT licensed. The EvalShift CLI it installs is licensed separately
-(AGPL-3.0-or-later).
+(Apache-2.0).
 
 ---
 
