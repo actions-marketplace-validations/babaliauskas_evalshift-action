@@ -260,7 +260,9 @@ run — the gate still works.
 2. Asks hosted EvalShift whether this job is covered by the organization's plan, before
    spending any model credits. See [Plan limits](#plan-limits).
 3. Runs `evalshift all --yes` against your config and suite, writing run state to
-   `.evalshift/runs` in the workspace.
+   `.evalshift/runs` in the workspace. `all` is the permanent alias of `evalshift compare`,
+   the CLI's current name for that command; the action types the alias so it also works with
+   CLI versions older than the rename. Run it as `evalshift compare` locally.
 4. Pushes the completed run to hosted EvalShift, creating the project if needed.
 5. Asks the hosted API for a compatible baseline run on the base branch,
    fetches the diff, and — under `fail-on: policy` — asks the server to judge

@@ -55,7 +55,8 @@ This action closes that gap. It makes "did this change make the model worse?" a 
 answered by the same statistics you'd get locally, on a pull request, before anyone can merge.
 
 If you don't have a suite yet, start with the CLI — `pip install evalshift && evalshift demo`
-gives you a working project in one command. Come back here once `evalshift all` passes locally.
+gives you a working project in one command. Come back here once `evalshift compare` passes
+locally.
 
 ---
 
@@ -70,8 +71,8 @@ Four things, all required:
 | 3 | Repository secret `EVALSHIFT_TOKEN` | Hosted EvalShift → Settings → API tokens → Service accounts. A scoped service-account key, starting with `es_`. See [The EvalShift token](#the-evalshift-token). |
 | 4 | A model provider API key as a repository secret | Whichever provider your config's models belong to |
 
-Verify locally first. If `evalshift all --yes` doesn't pass on your machine, it will not pass on
-a runner — you'll just pay for the model calls to find out.
+Verify locally first. If `evalshift compare --yes` doesn't pass on your machine, it will not
+pass on a runner — you'll just pay for the model calls to find out.
 
 ---
 
@@ -466,7 +467,10 @@ the action logs a warning and carries on rather than failing the run — the gat
    [Plan limits and the CI preflight](#plan-limits-and-the-ci-preflight).
 3. **Run.** `evalshift all --yes --config <config> --suite <suite>` in the workspace root.
    This is the full local pipeline: doctor → run → evaluate → analyze → report. Artifacts land
-   in `.evalshift/runs/<run-id>/`, including the self-contained `report.html`.
+   in `.evalshift/runs/<run-id>/`, including the self-contained `report.html`. The CLI has since
+   renamed this command to `evalshift compare` and kept `all` as a permanent alias, so the action
+   types `all` — the one spelling every installable CLI version answers to, including releases
+   older than the rename. Type `evalshift compare` when you run it yourself.
 4. **Push.** `evalshift push <run-id>` uploads the run bundle to hosted EvalShift, creating the
    project if `create-project` allows it. Git metadata from the runner environment travels with
    the bundle so the server can pair this run with base-branch runs later.
@@ -753,7 +757,8 @@ aren't exposed.
 ### `command failed (1): evalshift all --yes ...`
 
 The CLI itself failed — bad config, missing provider key, model API error. The CLI's own
-(redacted) stderr is printed directly above this line. Reproduce with the same command locally.
+(redacted) stderr is printed directly above this line. Reproduce with the same command locally;
+`evalshift compare` is that command under its current name, and `all` is its permanent alias.
 
 ### `no local EvalShift runs found in .../.evalshift/runs`
 
@@ -899,7 +904,7 @@ raw model outputs — is still produced, in the runner's workspace under `.evals
 
 **Can I use it without hosted EvalShift?**
 Not currently. The baseline lookup and the diff are server-side; without a hosted token there's
-nothing to compare against. If you want local-only CI gating, use `evalshift all` directly plus
+nothing to compare against. If you want local-only CI gating, use `evalshift compare` directly plus
 a migration policy in your config, and skip this action.
 
 **Does it upload my model outputs?**
