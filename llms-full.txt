@@ -109,8 +109,23 @@ corrupt the output file.
 evalshift all  --yes --config <config> --suite <suite>
 evalshift push <run_id> --config <config> --suite <suite> [--no-create-project]
 ```
-Both inherit the job environment plus `EVALSHIFT_HOST`, `EVALSHIFT_TOKEN` and `COLUMNS=512`.
-A non-zero exit from either raises `ActionError` and fails the step (message:
+`all` is deliberate, not stale. The CLI renamed that command to `evalshift compare` and kept
+`all` registered permanently as a hidden alias bound to the same function — no deprecation, no
+removal date. The action types `all` because it is the one spelling EVERY installable CLI
+version answers to, the pre-rename releases included (the pin defaults to one, and users may
+pin older still). The only difference at runtime is a one-line rename notice the CLI prints on
+stderr; stdout, exit codes and artefacts are identical. Do not rewrite this invocation to
+`compare` unless the minimum supported pin moves past the release that introduced it. Human
+docs say `compare` for what a developer types locally.
+
+`--suite` is always passed explicitly, as a path, and an explicit path outranks every other
+suite-selection rule in the CLI. So the CLI's ambiguous-suite error — and the framed panel of
+per-suite commands it prints when a config wires several `suites:` entries — cannot appear in
+CI. A repo whose suites live only under `suites:` still needs the `suite` input pointed at the
+right file: the default is the literal path `golden.jsonl`, not "whichever suite is wired".
+
+Both commands inherit the job environment plus `EVALSHIFT_HOST`, `EVALSHIFT_TOKEN` and
+`COLUMNS=512`. A non-zero exit from either raises `ActionError` and fails the step (message:
 `command failed (<rc>): <cmd>`). `COLUMNS` is set because the CLI prints through rich, which
 folds output at the console width (80 when stdout is a pipe, which it always is here) and
 would otherwise split the hosted run URL across two lines.
@@ -517,7 +532,8 @@ the env var covers any other prompt a CLI release adds.
   `scripts/cli_contract.sh`, which strips ANSI and asserts `evalshift all --help` still offers
   `--yes --config --suite` and `evalshift push --help` still offers
   `--no-create-project --config --suite`. Free — no API keys, no credits. This is the drift
-  alarm for CLI flag renames.
+  alarm for CLI flag renames. It checks `all`, the alias, because the alias is what the helper
+  types; a hidden command still answers `--help`, so this keeps working after the rename.
 - `tests/test_pin_consistency.py`: the `evalshift-version` default in `action.yml` is the single
   source of truth for the pin; this test fails when README, DOCS.md, or llms-full.txt mention a
   different version. The regex list is `PIN_SITES` in `scripts/bump_cli_pin.py`, which is also
@@ -624,7 +640,8 @@ on:
 `input 'token' is required` → the `token:` input is unset or an empty secret; secrets are not
 available to workflows triggered by `pull_request` from a fork.
 `command failed (1): evalshift all ...` → a CLI-level failure (bad config, missing provider key,
-model error). The CLI's own stderr is printed directly above, redacted.
+model error). The CLI's own stderr is printed directly above, redacted. Reproduce locally with
+`evalshift compare --yes --config <config> --suite <suite>` — same command, current name.
 `no local EvalShift runs found in .../.evalshift/runs` → `evalshift all` exited 0 without
 writing a run; almost always a config pointing at a different `--runs-base` or a CWD mismatch.
 `evalshift push did not print a hosted run URL` → CLI output shape changed, or push succeeded
