@@ -174,7 +174,7 @@ confirmation prompt, which has no answer on a runner.
 | `host`              | no       | `https://api.evalshift.dev` | Hosted API base URL. Set this only for a self-hosted or staging deployment. |
 | `config`            | no       | `evalshift.yaml`            | Path to your EvalShift config, relative to the repository root. Paths *inside* the config (prompt files, tools) resolve relative to the config file's own directory, so a config in a subdirectory works. |
 | `suite`             | no       | `golden.jsonl`              | Path to the golden JSONL suite, relative to the repository root. |
-| `evalshift-version` | no       | `0.14.1`                    | Exact EvalShift CLI version to install from PyPI. Pin this if you want run-to-run reproducibility across CLI releases. |
+| `evalshift-version` | no       | `0.15.0`                    | Exact EvalShift CLI version to install from PyPI. Pin this if you want run-to-run reproducibility across CLI releases. |
 | `python-version`    | no       | `3.12`                      | Python version used to install and run the CLI. |
 | `fail-on`           | no       | `policy`                    | Gating mode. See below. |
 | `branch`            | no       | auto                        | Candidate branch name recorded on the hosted run. Auto-detected from the PR head ref, else the pushed ref. Override only when your branch naming differs from the git ref. |
@@ -260,7 +260,9 @@ run — the gate still works.
 2. Asks hosted EvalShift whether this job is covered by the organization's plan, before
    spending any model credits. See [Plan limits](#plan-limits).
 3. Runs `evalshift all --yes` against your config and suite, writing run state to
-   `.evalshift/runs` in the workspace.
+   `.evalshift/runs` in the workspace. `all` is the permanent alias of `evalshift compare`,
+   the CLI's current name for that command; the action types the alias so it also works with
+   CLI versions older than the rename. Run it as `evalshift compare` locally.
 4. Pushes the completed run to hosted EvalShift, creating the project if needed.
 5. Asks the hosted API for a compatible baseline run on the base branch,
    fetches the diff, and — under `fail-on: policy` — asks the server to judge

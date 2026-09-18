@@ -497,6 +497,12 @@ def run_evalshift_commands(
     command_env["EVALSHIFT_HOST"] = config.host
     command_env["EVALSHIFT_TOKEN"] = config.token
     command_env["COLUMNS"] = CLI_CONSOLE_COLUMNS
+    # `all`, not `compare`: the CLI renamed this command to `evalshift compare` and kept
+    # `all` registered permanently as a hidden alias bound to the same function. The action
+    # types the name that exists in EVERY installable CLI version -- including releases older
+    # than the rename, which the default pin and any user pin may well be. Invoking the alias
+    # costs one notice line on stderr and nothing else. Do not "modernise" this to `compare`
+    # unless the minimum supported pin is raised past the release that introduced it.
     run(
         ["evalshift", "all", "--yes", "--config", config.config, "--suite", config.suite],
         cwd,

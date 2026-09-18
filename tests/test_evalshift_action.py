@@ -172,6 +172,8 @@ def test_run_evalshift_commands_runs_all_then_push(tmp_path: Path) -> None:
     )
 
     assert result.run_url == run_url
+    # `all`, not `compare`: the alias is permanent, and it is the only spelling every
+    # installable CLI version answers to. See run_evalshift_commands for the full reasoning.
     assert calls == [
         ["evalshift", "all", "--yes", "--config", "evalshift.yaml", "--suite", "golden.jsonl"],
         [
