@@ -29,3 +29,12 @@ slices:
     filter: formal
   - name: casual
     filter: casual
+
+# Wired under a name so the dogfood exercises the `suite-name` input -- the
+# spelling `evalshift init --ci` scaffolds, and the one that carries a suite's
+# own evaluator block. `managed: false` because no `capture sync` runs here.
+suites:
+  dogfood:
+    source: jsonl
+    path: golden.jsonl
+    managed: false

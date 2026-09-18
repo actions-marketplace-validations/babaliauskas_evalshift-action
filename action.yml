@@ -18,9 +18,21 @@ inputs:
     required: false
     default: evalshift.yaml
   suite:
-    description: Path to golden JSONL suite.
+    description: >-
+      Path to the golden JSONL suite. Mutually exclusive with 'suite-name'; defaults to
+      golden.jsonl when neither is set. A path selects the file only -- per-suite
+      evaluators wired under `suites:` in evalshift.yaml are keyed by NAME, so a suite
+      with its own evaluator block must be selected with 'suite-name' or it is scored
+      with the top-level evaluators instead.
     required: false
-    default: golden.jsonl
+    default: ""
+  suite-name:
+    description: >-
+      Name of a suite wired under `suites:` in evalshift.yaml (what `evalshift capture
+      sync` writes). Preferred over 'suite': it carries the suite's own evaluator block.
+      Requires an EvalShift CLI >= 0.14.0.
+    required: false
+    default: ""
   evalshift-version:
     description: EvalShift CLI version to install.
     required: false
@@ -100,6 +112,7 @@ runs:
         INPUT_HOST: ${{ inputs.host }}
         INPUT_CONFIG: ${{ inputs.config }}
         INPUT_SUITE: ${{ inputs.suite }}
+        INPUT_SUITE_NAME: ${{ inputs.suite-name }}
         INPUT_EVALSHIFT_VERSION: ${{ inputs.evalshift-version }}
         INPUT_FAIL_ON: ${{ inputs.fail-on }}
         INPUT_BRANCH: ${{ inputs.branch }}

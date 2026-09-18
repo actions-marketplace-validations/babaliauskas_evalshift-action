@@ -27,6 +27,12 @@ DEFAULT_HOST = "https://api.evalshift.dev"
 
 FAIL_ON_MODES = ("never", "regression", "any-slice-regression", "policy")
 DEFAULT_FAIL_ON = "policy"
+# Used when neither 'suite' nor 'suite-name' is set -- the conventional filename a
+# single-suite project keeps at its root.
+DEFAULT_SUITE_PATH = "golden.jsonl"
+# `--suite-name` landed in this CLI release. Older pins know only `--suite <path>`, and
+# would fail on an unknown option rather than on anything the reader could act on.
+MIN_SUITE_NAME_VERSION = (0, 14, 0)
 
 # A run has two ids and they are not interchangeable. The local one names the directory under
 # `.evalshift/runs` and is what `evalshift push` takes as its argument; the server mints its
@@ -113,6 +119,9 @@ class ActionConfig:
     config: str
     suite: str
     evalshift_version: str
+    # The `suites:` key, when the suite was selected by name. Empty means `suite` (a path)
+    # selects it instead; exactly one of the two is ever set.
+    suite_name: str
     fail_on: str
     branch: str
     base_branch: str
@@ -137,11 +146,17 @@ class ActionConfig:
         fail_on = _input(source, "FAIL_ON", DEFAULT_FAIL_ON)
         if fail_on not in FAIL_ON_MODES:
             raise ActionError(f"input 'fail-on' must be one of: {', '.join(FAIL_ON_MODES)}")
+        suite, suite_name = _suite_selection(
+            _input(source, "SUITE", ""),
+            _input(source, "SUITE_NAME", ""),
+            evalshift_version,
+        )
         return cls(
             token=token,
             host=_input(source, "HOST", DEFAULT_HOST).rstrip("/"),
             config=_input(source, "CONFIG", "evalshift.yaml"),
-            suite=_input(source, "SUITE", "golden.jsonl"),
+            suite=suite,
+            suite_name=suite_name,
             evalshift_version=evalshift_version,
             fail_on=fail_on,
             branch=_input(source, "BRANCH", ""),
@@ -425,6 +440,66 @@ def _bool_input(env: Mapping[str, str], name: str, default: bool) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _release_tuple(version: str) -> tuple[int, ...]:
+    """Leading numeric components of ``version``, for an ordering comparison.
+
+    Pins are plain releases (``1.0.0``) in practice, but a pre-release or local
+    segment must not crash the check, so everything from the first non-numeric
+    component on is dropped. An unparseable pin yields ``()``, which compares
+    below every real release -- callers treat that as "cannot vouch for it" and
+    skip the guard rather than block on a string they do not understand.
+    """
+    parts: list[int] = []
+    for chunk in version.split("."):
+        if not chunk.isdigit():
+            break
+        parts.append(int(chunk))
+    return tuple(parts)
+
+
+def _suite_selection(suite: str, suite_name: str, evalshift_version: str) -> tuple[str, str]:
+    """Resolve the ``suite`` / ``suite-name`` inputs into exactly one selection.
+
+    The two spellings do different things in the CLI, which is why only one may
+    be set: ``--suite <path>`` names a file and nothing else, while
+    ``--suite-name <key>`` also picks up that suite's own ``evaluators:`` block
+    from ``evalshift.yaml``. Passing a path for a suite that wires its own
+    evaluators scores it with the top-level set instead -- which is a green run
+    with the wrong evaluators, or an empty ``scores.jsonl``, not an error. So
+    setting both is refused rather than silently resolved by precedence.
+
+    Args:
+        suite: The ``suite`` input (a path), or ``""``.
+        suite_name: The ``suite-name`` input (a ``suites:`` key), or ``""``.
+        evalshift_version: The pinned CLI version, checked against
+            :data:`MIN_SUITE_NAME_VERSION` before a name is accepted.
+
+    Returns:
+        ``(suite, suite_name)`` with exactly one non-empty.
+
+    Raises:
+        ActionError: If both inputs are set, or if ``suite-name`` is set on a
+            pin too old to accept ``--suite-name``.
+    """
+    if suite and suite_name:
+        raise ActionError(
+            "inputs 'suite' and 'suite-name' are mutually exclusive -- set 'suite-name' "
+            "(the `suites:` key from evalshift.yaml, which carries that suite's own "
+            "evaluators) or 'suite' (a bare path), not both"
+        )
+    if not suite_name:
+        return suite or DEFAULT_SUITE_PATH, ""
+    pinned = _release_tuple(evalshift_version)
+    if pinned and pinned < MIN_SUITE_NAME_VERSION:
+        wanted = ".".join(str(part) for part in MIN_SUITE_NAME_VERSION)
+        raise ActionError(
+            f"input 'suite-name' needs an EvalShift CLI >= {wanted}, but "
+            f"'evalshift-version' pins {evalshift_version}. Raise the pin, or select the "
+            "suite with 'suite' (a path) instead."
+        )
+    return "", suite_name
+
+
 def detect_context(env: Mapping[str, str], branch: str, base_branch: str) -> GitHubContext:
     event_name = env.get("GITHUB_EVENT_NAME", "")
     repository = env.get("GITHUB_REPOSITORY", "")
@@ -497,6 +572,12 @@ def run_evalshift_commands(
     command_env["EVALSHIFT_HOST"] = config.host
     command_env["EVALSHIFT_TOKEN"] = config.token
     command_env["COLUMNS"] = CLI_CONSOLE_COLUMNS
+    # One selection, built once and passed to both commands: the run and the push must load
+    # the same suite the same way, and `push` re-resolves it to decide which evaluators the
+    # bundle claims. See `_suite_selection` for why a name is not a path.
+    selection = (
+        ["--suite-name", config.suite_name] if config.suite_name else ["--suite", config.suite]
+    )
     # `all`, not `compare`: the CLI renamed this command to `evalshift compare` and kept
     # `all` registered permanently as a hidden alias bound to the same function. The action
     # types the name that exists in EVERY installable CLI version -- including releases older
@@ -504,7 +585,7 @@ def run_evalshift_commands(
     # costs one notice line on stderr and nothing else. Do not "modernise" this to `compare`
     # unless the minimum supported pin is raised past the release that introduced it.
     run(
-        ["evalshift", "all", "--yes", "--config", config.config, "--suite", config.suite],
+        ["evalshift", "all", "--yes", "--config", config.config, *selection],
         cwd,
         command_env,
     )
@@ -517,8 +598,7 @@ def run_evalshift_commands(
         local_run_id,
         "--config",
         config.config,
-        "--suite",
-        config.suite,
+        *selection,
     ]
     if not config.create_project:
         push_cmd.append("--no-create-project")
@@ -846,8 +926,7 @@ def _policy_gating(
             top_slice_regressions=top_slice_regressions,
             mode="policy",
             summary=(
-                f"policy check unavailable — {reason}; "
-                f"fell back to fail-on: {POLICY_FALLBACK_MODE}"
+                f"policy check unavailable — {reason}; fell back to fail-on: {POLICY_FALLBACK_MODE}"
             ),
             policy_unavailable_reason=reason,
         )

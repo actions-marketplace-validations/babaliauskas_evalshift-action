@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -140,6 +141,7 @@ def _push_config(**overrides: Any) -> action.ActionConfig:
         "host": "https://api.evalshift.dev",
         "config": "evalshift.yaml",
         "suite": "golden.jsonl",
+        "suite_name": "",
         "evalshift_version": "0.4.0",
         "fail_on": "regression",
         "branch": "",
@@ -167,9 +169,7 @@ def test_run_evalshift_commands_runs_all_then_push(tmp_path: Path) -> None:
             returncode=0,
         )
 
-    result = action.run_evalshift_commands(
-        _push_config(), cwd=tmp_path, runner=fake_runner, env={}
-    )
+    result = action.run_evalshift_commands(_push_config(), cwd=tmp_path, runner=fake_runner, env={})
 
     assert result.run_url == run_url
     # `all`, not `compare`: the alias is permanent, and it is the only spelling every
@@ -211,9 +211,7 @@ def _push_result(
             returncode=0,
         )
 
-    return action.run_evalshift_commands(
-        _push_config(), cwd=tmp_path, runner=fake_runner, env={}
-    )
+    return action.run_evalshift_commands(_push_config(), cwd=tmp_path, runner=fake_runner, env={})
 
 
 def test_run_evalshift_commands_reports_the_server_run_id_not_the_local_one(
@@ -257,6 +255,122 @@ def test_run_evalshift_commands_widens_the_cli_console(tmp_path: Path) -> None:
         # `COLUMNS` the developer's own terminal happens to export, which made this test pass
         # with the production line deleted.
         assert env["COLUMNS"] == action.CLI_CONSOLE_COLUMNS
+
+
+def _selected_commands(tmp_path: Path, config: action.ActionConfig) -> list[list[str]]:
+    """Both CLI invocations `run_evalshift_commands` issues for ``config``."""
+    (tmp_path / ".evalshift" / "runs" / LOCAL_RUN_ID).mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    def fake_runner(cmd: list[str], cwd: Path, env: dict[str, str]) -> action.CommandResult:
+        calls.append(cmd)
+        return action.CommandResult(
+            stdout=f"{SERVER_RUN_URL}\n" if cmd[1] == "push" else "",
+            returncode=0,
+        )
+
+    action.run_evalshift_commands(config, cwd=tmp_path, runner=fake_runner, env={})
+    return calls
+
+
+def test_a_named_suite_is_selected_by_name_on_both_commands(tmp_path: Path) -> None:
+    """`--suite-name`, not `--suite`: a path loses the suite's own `evaluators:` block.
+
+    A suite wired under `suites:` with its own tool evaluators, selected by path, is scored
+    with the top-level evaluators instead — which for a tool-only suite means an empty
+    `scores.jsonl` and a failed run that names no cause. `push` re-resolves the same
+    selection to decide which evaluators the bundle claims, so both commands carry it.
+    """
+    calls = _selected_commands(tmp_path, _push_config(suite="", suite_name="planner"))
+
+    assert calls == [
+        ["evalshift", "all", "--yes", "--config", "evalshift.yaml", "--suite-name", "planner"],
+        [
+            "evalshift",
+            "push",
+            LOCAL_RUN_ID,
+            "--config",
+            "evalshift.yaml",
+            "--suite-name",
+            "planner",
+            "--no-create-project",
+        ],
+    ]
+
+
+def test_a_path_suite_still_selects_by_path(tmp_path: Path) -> None:
+    """The `suite` input predates `suite-name` and keeps working untouched."""
+    calls = _selected_commands(tmp_path, _push_config(suite="eval/golden.jsonl"))
+
+    for cmd in calls:
+        assert "--suite" in cmd
+        assert "--suite-name" not in cmd
+        assert cmd[cmd.index("--suite") + 1] == "eval/golden.jsonl"
+
+
+def test_action_config_reads_the_suite_name_input() -> None:
+    config = action.ActionConfig.from_env(
+        {
+            "INPUT_TOKEN": "es_secret",
+            "INPUT_EVALSHIFT_VERSION": "1.0.0",
+            "INPUT_SUITE_NAME": "planner",
+        }
+    )
+
+    assert (config.suite, config.suite_name) == ("", "planner")
+
+
+def test_action_config_defaults_to_the_bare_golden_suite() -> None:
+    """Neither input set: the pre-`suite-name` default, unchanged."""
+    config = action.ActionConfig.from_env(
+        {"INPUT_TOKEN": "es_secret", "INPUT_EVALSHIFT_VERSION": "1.0.0"}
+    )
+
+    assert (config.suite, config.suite_name) == ("golden.jsonl", "")
+
+
+def test_manifest_suite_default_is_resolved_by_the_script() -> None:
+    """action.yml leaves `suite` empty so "both set" is detectable; the script fills it in."""
+    assert manifest_input_default("suite") == ""
+    assert manifest_input_default("suite-name") == ""
+
+
+def test_action_config_rejects_both_suite_spellings() -> None:
+    """Precedence would silently drop one selection — and each means something different."""
+    with pytest.raises(action.ActionError, match="mutually exclusive"):
+        action.ActionConfig.from_env(
+            {
+                "INPUT_TOKEN": "es_secret",
+                "INPUT_EVALSHIFT_VERSION": "1.0.0",
+                "INPUT_SUITE": "eval/golden.jsonl",
+                "INPUT_SUITE_NAME": "planner",
+            }
+        )
+
+
+def test_action_config_rejects_a_suite_name_on_a_pin_that_predates_it() -> None:
+    """0.13.1 has no `--suite-name`; say so here instead of letting the CLI print a usage error."""
+    with pytest.raises(action.ActionError, match=re.escape("0.14.0")):
+        action.ActionConfig.from_env(
+            {
+                "INPUT_TOKEN": "es_secret",
+                "INPUT_EVALSHIFT_VERSION": "0.13.1",
+                "INPUT_SUITE_NAME": "planner",
+            }
+        )
+
+
+def test_action_config_allows_a_suite_name_on_an_unparseable_pin() -> None:
+    """A pin the guard cannot order (a local wheel, a git ref) is not evidence of an old CLI."""
+    config = action.ActionConfig.from_env(
+        {
+            "INPUT_TOKEN": "es_secret",
+            "INPUT_EVALSHIFT_VERSION": "main",
+            "INPUT_SUITE_NAME": "planner",
+        }
+    )
+
+    assert config.suite_name == "planner"
 
 
 @pytest.mark.parametrize(
@@ -907,9 +1021,7 @@ def test_comment_renders_no_budget_table_for_an_all_insufficient_run() -> None:
     gating = action.evaluate_gating(
         CLEAN_DIFF,
         "policy",
-        policy=_policy_payload(
-            "inconclusive", reason=reason, budgets=[], blocking_regressions=[]
-        ),
+        policy=_policy_payload("inconclusive", reason=reason, budgets=[], blocking_regressions=[]),
     )
 
     body = _policy_comment(gating, CLEAN_DIFF)
@@ -1137,9 +1249,7 @@ def test_hosted_client_leaves_other_http_errors_alone() -> None:
     def failing_request(*args: Any, **kwargs: Any) -> Any:
         raise HTTPError("https://api.evalshift.test/runs", 500, "Server Error", {}, None)
 
-    client = action.HostedClient(
-        "https://api.evalshift.test", "es_secret", request=failing_request
-    )
+    client = action.HostedClient("https://api.evalshift.test", "es_secret", request=failing_request)
 
     with pytest.raises(HTTPError):
         client.run_diff("/runs/base/diff/candidate")
@@ -1602,9 +1712,7 @@ def test_main_does_not_fail_the_job_on_an_all_insufficient_run(
     exit_code = _policy_main(
         monkeypatch,
         tmp_path,
-        payload=_policy_payload(
-            "inconclusive", reason=reason, budgets=[], blocking_regressions=[]
-        ),
+        payload=_policy_payload("inconclusive", reason=reason, budgets=[], blocking_regressions=[]),
     )
 
     out = capsys.readouterr().out
