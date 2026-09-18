@@ -238,7 +238,8 @@ means a hung job.
 | `token` | yes | — | Hosted EvalShift API token, an `es_...` value. Masked in logs and redacted from CLI output. |
 | `host` | no | `https://api.evalshift.dev` | Hosted API base URL. Set only for a self-hosted or staging deployment. |
 | `config` | no | `evalshift.yaml` | Path to your config, relative to the repository root. Paths *inside* the config (prompt files, tools) resolve relative to the config file's own directory, so a config in a subdirectory works. |
-| `suite` | no | `golden.jsonl` | Path to the golden JSONL suite, relative to the repository root. |
+| `suite` | no | `golden.jsonl` | Path to the golden JSONL suite, relative to the repository root. Selects a *file* and nothing else — see [Selecting a suite](#selecting-a-suite-name-vs-path). Mutually exclusive with `suite-name`. |
+| `suite-name` | no | — | Name of a suite wired under `suites:` in `evalshift.yaml`. Prefer this over `suite`. Needs `evalshift-version` >= `0.14.0`. See [Selecting a suite](#selecting-a-suite-name-vs-path). |
 | `evalshift-version` | no | `1.0.0` | Exact CLI version installed from PyPI. Pin this for run-to-run reproducibility across CLI releases. |
 | `python-version` | no | `3.12` | Python used to install and run the CLI. Must satisfy the CLI's minimum (3.11 for 1.0.0). |
 | `fail-on` | no | `policy` | Gating mode. See [below](#gating-the-fail-on-modes). |
@@ -465,7 +466,8 @@ the action logs a warning and carries on rather than failing the run — the gat
 2. **Preflight.** Asks hosted EvalShift whether this job is covered by the org's plan, before
    a single model call. A `402` stops the job here; anything else lets it continue. See
    [Plan limits and the CI preflight](#plan-limits-and-the-ci-preflight).
-3. **Run.** `evalshift all --yes --config <config> --suite <suite>` in the workspace root.
+3. **Run.** `evalshift all --yes --config <config>` plus the suite selection
+   (`--suite-name <name>`, or `--suite <path>`) in the workspace root.
    This is the full local pipeline: doctor → run → evaluate → analyze → report. Artifacts land
    in `.evalshift/runs/<run-id>/`, including the self-contained `report.html`. The CLI has since
    renamed this command to `evalshift compare` and kept `all` as a permanent alias, so the action
@@ -599,6 +601,50 @@ server has no view of your GitHub repository. Two consequences worth knowing:
 
 ---
 
+## Selecting a suite: name vs. path
+
+Two inputs select the suite, and they are **not** interchangeable. Set one or the other; the
+action fails fast if both are set.
+
+`suite-name` names a key under `suites:` in `evalshift.yaml` — the block `evalshift capture
+sync` writes and rewrites:
+
+```yaml
+suites:
+  planner:
+    source: captured
+    path: .evalshift/suites/planner/golden.jsonl
+    evaluators:
+      tool_selection:
+        - name: routing
+          conformance: expected
+          divergence: set
+```
+
+```yaml
+      - uses: babaliauskas/evalshift-action@v0
+        with:
+          token: ${{ secrets.EVALSHIFT_TOKEN }}
+          suite-name: planner
+```
+
+`suite` names a file on disk, and nothing more:
+
+```yaml
+          suite: .evalshift/suites/planner/golden.jsonl
+```
+
+Both load the same rows. Only the name carries that suite's **own evaluator block**. Select
+the suite above by path and it is scored with the top-level `evaluators:` instead — for a
+tool-calling suite whose top-level evaluators are `semantic` + `llm_judge`, that scores
+nothing at all, and the run fails at `analyze` with `scores.jsonl is empty`. Nothing warns
+you: a path is a legitimate way to run a suite that has no entry under `suites:`.
+
+So: **if the suite has an entry under `suites:`, select it by name.** Reach for `suite` only
+for a one-off file that is not wired into the config. `suite-name` needs an EvalShift CLI of
+`0.14.0` or newer; on an older pin the action says so rather than letting the CLI print a
+usage error.
+
 ## Recipes
 
 ### Config in a subdirectory
@@ -608,7 +654,7 @@ server has no view of your GitHub repository. Two consequences worth knowing:
         with:
           token: ${{ secrets.EVALSHIFT_TOKEN }}
           config: eval/evalshift.yaml
-          suite: eval/golden.jsonl
+          suite: eval/golden.jsonl   # or suite-name: <key>, if it is wired under suites:
 ```
 
 Paths inside the config resolve relative to the config file, so `prompts.py` next to

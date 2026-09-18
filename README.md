@@ -173,8 +173,9 @@ confirmation prompt, which has no answer on a runner.
 | `token`             | yes      | —                           | Hosted EvalShift API token, an `es_...` value. Masked in logs and redacted from CLI output. |
 | `host`              | no       | `https://api.evalshift.dev` | Hosted API base URL. Set this only for a self-hosted or staging deployment. |
 | `config`            | no       | `evalshift.yaml`            | Path to your EvalShift config, relative to the repository root. Paths *inside* the config (prompt files, tools) resolve relative to the config file's own directory, so a config in a subdirectory works. |
-| `suite`             | no       | `golden.jsonl`              | Path to the golden JSONL suite, relative to the repository root. |
-| `evalshift-version` | no       | `1.0.0`                    | Exact EvalShift CLI version to install from PyPI. Pin this if you want run-to-run reproducibility across CLI releases. |
+| `suite`             | no       | `golden.jsonl`              | Path to the golden JSONL suite, relative to the repository root. Selects a *file*: a suite that wires its own `evaluators:` block under `suites:` must be selected with `suite-name` instead, or it is scored with the top-level evaluators. Mutually exclusive with `suite-name`. |
+| `suite-name`        | no       | —                           | Name of a suite wired under `suites:` in `evalshift.yaml` (what `evalshift capture sync` writes). Prefer this over `suite`: it carries that suite's own evaluator block. Needs `evalshift-version` >= `0.14.0`. |
+| `evalshift-version` | no       | `1.0.0`                     | Exact EvalShift CLI version to install from PyPI. Pin this if you want run-to-run reproducibility across CLI releases. |
 | `python-version`    | no       | `3.12`                      | Python version used to install and run the CLI. |
 | `fail-on`           | no       | `policy`                    | Gating mode. See below. |
 | `branch`            | no       | auto                        | Candidate branch name recorded on the hosted run. Auto-detected from the PR head ref, else the pushed ref. Override only when your branch naming differs from the git ref. |
