@@ -41,7 +41,7 @@ jobs:
 
 Prerequisites in the repository, all of them hard requirements:
 1. `evalshift.yaml` committed (or `config:` pointed at wherever it lives).
-2. A golden JSONL suite committed (or `suite:` pointed at it).
+2. A golden JSONL suite committed, selected with `suite-name:` (a `suites:` key) or `suite:` (a path).
 3. Repository (or environment) secret `EVALSHIFT_TOKEN` — an `es_...` service-account key,
    scoped to `run:create` + `run:read`. See "Token hygiene" below. (`project:read` additionally
    enables the plan preflight; without it the preflight is skipped, not failed.)
@@ -75,7 +75,8 @@ log until it completes.
 | token | yes | — | Hosted EvalShift API token (`es_...`). Masked via `::add-mask::`, and redacted from CLI output. Passed to the CLI as env `EVALSHIFT_TOKEN`, never in argv. |
 | host | no | https://api.evalshift.dev | Hosted API base URL. Trailing `/` stripped. Passed as env `EVALSHIFT_HOST`. Set only for self-hosted/staging. |
 | config | no | evalshift.yaml | Path to config, relative to workspace root. Paths *inside* the config resolve relative to the config file's own directory (CLI behavior), so a config in a subdirectory works unchanged. |
-| suite | no | golden.jsonl | Path to golden JSONL suite, relative to workspace root. |
+| suite | no | golden.jsonl | Path to golden JSONL suite, relative to workspace root. Selects the FILE only. Mutually exclusive with suite-name. |
+| suite-name | no | (empty) | `suites:` key in evalshift.yaml. Carries that suite's own evaluators block. Needs evalshift-version >= 0.14.0. Mutually exclusive with suite. |
 | evalshift-version | no | 1.0.0 | Exact CLI version installed from PyPI. Pinned for reproducibility. |
 | python-version | no | 3.12 | Python for the CLI. Must satisfy the CLI's `requires-python` (>=3.11 for 1.0.0); lowering it below that breaks install. |
 | fail-on | no | policy | `policy` \| `never` \| `regression` \| `any-slice-regression`. Any other value → hard error before any work. DEFAULT CHANGED: was `regression`; `policy` gates on the server's migration-policy verdict, not on the diff. |
@@ -106,8 +107,9 @@ corrupt the output file.
 ## Commands the action shells out to
 
 ```
-evalshift all  --yes --config <config> --suite <suite>
-evalshift push <run_id> --config <config> --suite <suite> [--no-create-project]
+evalshift all  --yes --config <config> <selection>
+evalshift push <run_id> --config <config> <selection> [--no-create-project]
+# <selection> is `--suite-name <name>` when the suite-name input is set, else `--suite <path>`.
 ```
 `all` is deliberate, not stale. The CLI renamed that command to `evalshift compare` and kept
 `all` registered permanently as a hidden alias bound to the same function — no deprecation, no
@@ -118,11 +120,21 @@ stderr; stdout, exit codes and artefacts are identical. Do not rewrite this invo
 `compare` unless the minimum supported pin moves past the release that introduced it. Human
 docs say `compare` for what a developer types locally.
 
-`--suite` is always passed explicitly, as a path, and an explicit path outranks every other
-suite-selection rule in the CLI. So the CLI's ambiguous-suite error — and the framed panel of
-per-suite commands it prints when a config wires several `suites:` entries — cannot appear in
-CI. A repo whose suites live only under `suites:` still needs the `suite` input pointed at the
-right file: the default is the literal path `golden.jsonl`, not "whichever suite is wired".
+Exactly one suite-selection flag is passed, and both commands get the same one, so the CLI's
+ambiguous-suite error — and the framed panel of per-suite commands it prints when a config
+wires several `suites:` entries — cannot appear in CI. The default, when neither input is set,
+is the literal path `golden.jsonl`, not "whichever suite is wired".
+
+NAME vs PATH is not cosmetic. `--suite <path>` selects a file; `--suite-name <key>` also
+resolves that suite's own `evaluators:` override out of `suites:` (CLI:
+`EvalShiftConfig.evaluators_for`, which maps a `None` name to the top-level block). Select a
+wired suite by path and it is silently scored with the top-level evaluators — for a
+tool-calling suite under a `semantic` + `llm_judge` top level that scores zero rows and the run
+dies at `analyze` with `scores.jsonl is empty`. So: a suite with an entry under `suites:` is
+selected with `suite-name`; `suite` is for a file that is not wired into the config. Setting
+both inputs is refused (`ActionError`, "mutually exclusive") rather than resolved by
+precedence, and `suite-name` on a pin below 0.14.0 — the release that added `--suite-name` —
+is refused with the pin named.
 
 Both commands inherit the job environment plus `EVALSHIFT_HOST`, `EVALSHIFT_TOKEN` and
 `COLUMNS=512`. A non-zero exit from either raises `ActionError` and fails the step (message:
@@ -530,8 +542,8 @@ the env var covers any other prompt a CLI release adds.
 - `.github/workflows/ci.yml` job `cli-contract`: reads `evalshift-version` and `python-version`
   defaults straight out of `action.yml` via awk, installs that exact CLI, then runs
   `scripts/cli_contract.sh`, which strips ANSI and asserts `evalshift all --help` still offers
-  `--yes --config --suite` and `evalshift push --help` still offers
-  `--no-create-project --config --suite`. Free — no API keys, no credits. This is the drift
+  `--yes --config --suite --suite-name` and `evalshift push --help` still offers
+  `--no-create-project --config --suite --suite-name`. Free — no API keys, no credits. This is the drift
   alarm for CLI flag renames. It checks `all`, the alias, because the alias is what the helper
   types; a hidden command still answers `--help`, so this keeps working after the rename.
 - `tests/test_pin_consistency.py`: the `evalshift-version` default in `action.yml` is the single
@@ -641,7 +653,9 @@ on:
 available to workflows triggered by `pull_request` from a fork.
 `command failed (1): evalshift all ...` → a CLI-level failure (bad config, missing provider key,
 model error). The CLI's own stderr is printed directly above, redacted. Reproduce locally with
-`evalshift compare --yes --config <config> --suite <suite>` — same command, current name.
+`evalshift compare --yes --config <config> --suite-name <name>` — same command, current name.
+`scores.jsonl is empty` from `analyze` on a tool-calling suite → the suite was selected by path,
+so its per-suite tool evaluators never loaded. Switch the step to `suite-name: <key>`.
 `no local EvalShift runs found in .../.evalshift/runs` → `evalshift all` exited 0 without
 writing a run; almost always a config pointing at a different `--runs-base` or a CWD mismatch.
 `evalshift push did not print a hosted run URL` → CLI output shape changed, or push succeeded

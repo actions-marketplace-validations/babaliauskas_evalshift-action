@@ -40,5 +40,5 @@ check() {
 # `all` is the permanent alias of `evalshift compare`, and the alias is what
 # scripts/evalshift_action.py types, so the alias is what this contract asserts. A hidden
 # command still answers `--help`, so this keeps working after a pin bump past the rename.
-check all --yes --config --suite
-check push --no-create-project --config --suite
+check all --yes --config --suite --suite-name
+check push --no-create-project --config --suite --suite-name

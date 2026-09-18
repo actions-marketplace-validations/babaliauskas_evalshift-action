@@ -43,7 +43,10 @@ jobs:
         with:
           token: ${{ secrets.EVALSHIFT_TOKEN }}
           config: examples/dogfood/evalshift.yaml
-          suite: examples/dogfood/golden.jsonl
+          # By name, not by path: this is the spelling `evalshift init --ci`
+          # scaffolds, so it is the one that needs end-to-end proof. The path
+          # form stays covered by the unit tests.
+          suite-name: dogfood
           fail-on: never
           comment: "false"
 
