@@ -243,6 +243,7 @@ means a hung job.
 | `evalshift-version` | no | `1.0.1` | Exact CLI version installed from PyPI. Pin this for run-to-run reproducibility across CLI releases. |
 | `python-version` | no | `3.12` | Python used to install and run the CLI. Must satisfy the CLI's minimum (3.11 for 1.0.1). |
 | `fail-on` | no | `policy` | Gating mode. See [below](#gating-the-fail-on-modes). |
+| `require-policy` | no | `false` | Whether a run pushed without a `migration_policy` fails the job. By default such a run merges, reported as ungated — a `::warning::` annotation and a commit status saying the gate is off. Read only under `fail-on: policy`. See [When no policy was pushed](#when-no-policy-was-pushed). |
 | `branch` | no | auto | Candidate branch name recorded on the hosted run. Auto-detected from the PR head ref, else the pushed ref. |
 | `base-branch` | no | auto | Branch to look for a baseline run on. Auto-detected from the PR base ref, else the current ref. Resolving to empty means no baseline is fetched and the check always passes. |
 | `create-project` | no | `true` | Whether `evalshift push` may auto-create the hosted project when it doesn't exist. Set `false` to make a missing project a hard failure. |
@@ -283,17 +284,20 @@ job lacks permission to comment.
 
 | Mode | The job fails when |
 | ---- | ------------------ |
-| `policy` | Hosted EvalShift evaluates the run against the project's migration policy and answers `fail`. **Default.** |
+| `policy` | Hosted EvalShift evaluates the run against the migration policy it was pushed with — the `migration_policy` block of your `evalshift.yaml` — and answers `fail`. **Default.** |
 | `never` | Never. Records the run, pushes it, comments — but never blocks the merge. Use while you're still calibrating a suite. |
 | `regression` | The hosted diff reports one or more regressed examples in aggregate. |
 | `any-slice-regression` | Any slice's pass rate moved down, even when the aggregate is flat or improved. Stricter — catches one slice degrading while the overall number hides it. |
 
 ### `policy` — the governed gate
 
-`policy` is the only mode that enforces what you configured. The action calls
-`GET /runs/{run-id}/policy-check` and follows the answer; it does not re-implement a single
-threshold. The same verdict is what the CLI and the web app show, so a merge blocked in CI is
-blocked for the same stated reason everywhere.
+`policy` is the only mode that enforces what you configured. What you configured is the
+`migration_policy` block of your `evalshift.yaml`: the CLI resolves it, `evalshift push` carries
+it along with the run, and the server gates that run on that snapshot forever — a later edit to
+the yaml never rewrites a past verdict. The action calls `GET /runs/{run-id}/policy-check` and
+follows the answer; it does not re-implement a single threshold. The same verdict is what your
+local `evalshift compare` and the run's Policy tab show, so a merge blocked in CI is blocked for
+the same stated reason everywhere.
 
 That makes it disagree with `regression` in both directions, on purpose:
 
@@ -318,6 +322,7 @@ the web app.
 | `conditional_pass` | `False` | A pass, with a caveat blockquote and the server's reason. |
 | `fail` | `True` | A failure, with the busted budgets and blocking regressions. |
 | `inconclusive` | `False` | Undecided — explicitly *not* a pass. |
+| `inconclusive`, `policy_source: none` | `False`, or `True` under `require-policy` | Ungated — no policy was pushed with the run. Its own wording, its own annotation. |
 
 **`conditional_pass` is a pass.** Every budget held and nothing critical or high regressed, but
 something milder did: medium/low regressions, and/or comparisons that scored zero pairs. The
@@ -328,8 +333,9 @@ clean and pointing at the reason.
 
 **`inconclusive` has six distinct causes**, carried only by the `reason` string:
 
-1. no policy is configured on the project — there were no budgets to check, and
-   `policy` is `null` with `budgets: []`;
+1. the run carried no policy — there were no budgets to check, and `policy` is `null` with
+   `budgets: []`. The server reports `policy_source: "none"` for this one, and the action
+   handles it separately; see [When no policy was pushed](#when-no-policy-was-pushed);
 2. no policy metrics were recorded for the run at all;
 3. nothing was measured — no blocking evaluator scored a single record, so the quality
    budgets are clean by absence rather than by evidence;
@@ -349,6 +355,25 @@ never presented as a pass. The comment and the commit-status description say the
 decide. The `conclusion` output stays `success`, because it is a GitHub commit-status state and
 there is no third value; read the comment, not the output, when you care about the difference.
 
+#### When no policy was pushed
+
+`policy_source: "none"` with `inconclusive` is the one case that is not a judgement about your
+run: the run reached the server carrying no `migration_policy`, so there was no gate to run.
+Every check is green, and nothing about a green check says the gate is off — which is why the
+action treats this case on its own:
+
+- the job log, the commit-status description and the PR comment say *"the gate is off — no
+  migration policy was pushed with this run; add migration_policy to evalshift.yaml"*, instead
+  of the `inconclusive` wording about a policy that could not decide;
+- a `::warning::` workflow annotation is printed on **stdout**, so it surfaces in the job
+  summary and on the PR's Files view. (GitHub collects annotations from stdout only; the
+  fallback warning below goes to stderr, where it is log text and nothing more.)
+
+The fix is one block in `evalshift.yaml` and a push. Until then the job still merges —
+upgrading the action must not turn a repository red overnight. Set `require-policy: true` when
+you want an ungated PR to be a failing check instead; it governs this case only, never a verdict
+the policy did reach and never the unavailable-check fallback below.
+
 **When the policy check is unavailable.** If it errors, 404s, or has no stored decision for the
 run, the action falls back to `regression` gating for that run and announces it in the job log,
 the commit-status description, and the PR comment. It does not silently go green — but for that
@@ -363,7 +388,7 @@ want both guarantees, run the action twice with different modes (and `comment: "
 of them), or keep `regression` and rely on slices for diagnosis rather than gating.
 
 **Suggested progression:** start at `never` for a week or two while the suite settles, then move
-to `policy` and tune the budgets in the web app until the gate agrees with your own judgement of
+to `policy` and tune the budgets in `evalshift.yaml` until the gate agrees with your own judgement of
 which PRs should have been blocked. Reach for `regression` or `any-slice-regression` only when
 you deliberately want a diff-shaped question the policy doesn't ask.
 
@@ -481,8 +506,8 @@ the action logs a warning and carries on rather than failing the run — the gat
    an older one.
 6. **Fetch the diff.** Pulls aggregate and per-slice deltas from the hosted API.
 7. **Ask the policy gate.** Under `fail-on: policy`, `GET /runs/{id}/policy-check` returns the
-   server's verdict on this run against the project's migration policy, with the budget-by-budget
-   arithmetic behind it. Skipped in the other modes.
+   server's verdict on this run against the migration policy it was pushed with, plus the
+   budget-by-budget arithmetic behind it. Skipped in the other modes.
 8. **Report.** Writes the five outputs, upserts the PR comment, sets the commit status.
 9. **Gate.** Exits non-zero when the gate says so — the policy verdict under `fail-on: policy`,
    the diff otherwise.
@@ -777,7 +802,8 @@ Worth knowing before you rely on this in anger:
 - **A policy that cannot decide does not fail the job.** `inconclusive` — and any status
   outside the four the server defines, which a newer server could return to an older pinned
   action — is reported loudly and gated as a non-failure. If you want undecided to block a
-  merge, that is a policy change on the server, not an action input.
+  merge, that is a policy change on the server, not an action input. The single exception is a
+  run that carried no policy at all, which `require-policy: true` turns into a failure.
 - **`conditional_pass` merges.** It is a pass by design, not a near-miss the action rounds
   down. The check goes green, the comment carries the caveat, and nothing stops the merge. If
   medium/low regressions should block, tighten the policy server-side — the action will not
@@ -870,16 +896,26 @@ limits when the run is uploaded, so this warning never means a limit was bypasse
 
 Under `fail-on: policy` the action could not get a verdict for this run — the endpoint errored,
 answered `404`, or holds no stored decision for the run. The job still gated, but on the diff
-rather than on your policy, and the PR comment carries the same warning. A persistent `404` on
-runs that *do* exist usually means the project has no migration policy configured, so there is
-nothing for the server to decide against.
+rather than on your policy, and the PR comment carries the same warning. This is about reading
+the verdict, not about having a policy: a run pushed without one gets an answer, and that answer
+is the annotation below.
+
+### `::warning::no migration policy was pushed with this run`
+
+Your `evalshift.yaml` has no `migration_policy` block, so nothing gated this PR — the check is
+green because no gate ran, not because the run was clean. Add the block and push again; the
+policy travels with every run from then on. See
+[When no policy was pushed](#when-no-policy-was-pushed), and `require-policy: true` if you would
+rather the job failed until then.
 
 ### The check is always green
 
-In order of likelihood: under the default `fail-on: policy`, the project's migration policy is
-permissive enough that nothing has busted a budget yet (the comment shows the budget arithmetic —
-if every row passes with room to spare, tighten them in the web app); no baseline run exists on
-the base branch yet (add the `push` trigger to `main` and merge once); `fail-on` is `never`; or
+In order of likelihood: nothing is gating at all because the run carried no `migration_policy`
+(the job log carries a `::warning::` saying so — see
+[When no policy was pushed](#when-no-policy-was-pushed)); under the default `fail-on: policy`,
+the policy is permissive enough that nothing has busted a budget yet (the comment shows the
+budget arithmetic — if every row passes with room to spare, tighten it in `evalshift.yaml`); no
+baseline run exists on the base branch yet (add the `push` trigger to `main` and merge once); `fail-on` is `never`; or
 `base-branch` resolved to an empty string.
 
 ### Two EvalShift comments on one PR
