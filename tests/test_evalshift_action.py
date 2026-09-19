@@ -715,6 +715,145 @@ def test_policy_mode_does_not_render_an_inconclusive_decision_as_a_pass() -> Non
     assert "could not decide" in result.summary
 
 
+# `policy_source: "none"` is the server saying the run carried no policy at all -- not that it
+# weighed one and could not decide. The four tests below pin the difference, because the two
+# arrive as the same `inconclusive` status and only the source tells a reader which one is theirs.
+def test_an_ungated_run_says_the_gate_is_off_rather_than_undecided() -> None:
+    result = action.evaluate_gating(
+        CLEAN_DIFF,
+        "policy",
+        policy=_policy_payload("inconclusive", policy_source="none"),
+    )
+
+    assert result.should_fail is False
+    assert result.conclusion == "success"
+    assert result.summary == (
+        "the gate is off — no migration policy was pushed with this run; "
+        "add migration_policy to evalshift.yaml"
+    )
+
+
+def test_an_ungated_run_prints_a_workflow_annotation_on_stdout(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """GitHub reads annotations off the step's stdout only -- stderr is just log text."""
+    action.evaluate_gating(
+        CLEAN_DIFF,
+        "policy",
+        policy=_policy_payload("inconclusive", policy_source="none"),
+    )
+
+    captured = capsys.readouterr()
+    annotation = next(line for line in captured.out.splitlines() if line.startswith("::warning"))
+    assert "migration_policy" in annotation
+    assert "evalshift.yaml" in annotation
+    assert "::warning" not in captured.err
+
+
+def test_the_ungated_summary_does_not_repeat_the_server_reason() -> None:
+    """The fix is already in the sentence; the reason still travels to the PR comment."""
+    reason = "No migration policy was pushed with this run."
+    result = action.evaluate_gating(
+        CLEAN_DIFF,
+        "policy",
+        policy=_policy_payload("inconclusive", policy_source="none", reason=reason),
+    )
+
+    assert reason not in result.summary
+    assert result.policy_reason == reason
+
+
+def test_a_run_that_carried_a_policy_is_never_annotated(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = action.evaluate_gating(
+        CLEAN_DIFF,
+        "policy",
+        policy=_policy_payload("inconclusive", policy_source="run_policy"),
+    )
+
+    assert "could not decide" in result.summary
+    assert "::warning" not in capsys.readouterr().out
+
+
+def test_require_policy_fails_an_ungated_run() -> None:
+    result = action.evaluate_gating(
+        CLEAN_DIFF,
+        "policy",
+        policy=_policy_payload("inconclusive", policy_source="none"),
+        require_policy=True,
+    )
+
+    assert result.should_fail is True
+    assert result.conclusion == "failure"
+    assert "require-policy" in result.summary
+    assert "add migration_policy to evalshift.yaml" in result.summary
+
+
+def test_require_policy_leaves_a_run_that_carried_a_policy_alone() -> None:
+    """It is an opt-in about the missing policy, not a second opinion on the verdict."""
+    result = action.evaluate_gating(
+        CLEAN_DIFF,
+        "policy",
+        policy=_policy_payload("inconclusive", policy_source="run_policy"),
+        require_policy=True,
+    )
+
+    assert result.should_fail is False
+    assert result.conclusion == "success"
+
+
+def test_require_policy_does_not_fail_the_unreachable_policy_check() -> None:
+    """No decision at all is the fallback path's business; require-policy has no opinion there."""
+    result = action.evaluate_gating(
+        CLEAN_DIFF,
+        "policy",
+        policy=None,
+        policy_unavailable="hosted policy check returned HTTP 503",
+        require_policy=True,
+    )
+
+    assert result.should_fail is False
+    assert "fell back to fail-on" in result.summary
+
+
+def test_action_config_does_not_require_a_policy_by_default() -> None:
+    config = action.ActionConfig.from_env(
+        {"INPUT_TOKEN": "es_secret", "INPUT_EVALSHIFT_VERSION": "1.2.3"}
+    )
+
+    assert config.require_policy is False
+
+
+def test_action_config_reads_the_require_policy_input() -> None:
+    config = action.ActionConfig.from_env(
+        {
+            "INPUT_TOKEN": "es_secret",
+            "INPUT_EVALSHIFT_VERSION": "1.2.3",
+            "INPUT_REQUIRE_POLICY": "true",
+        }
+    )
+
+    assert config.require_policy is True
+
+
+def test_manifest_require_policy_default_matches_the_script_default() -> None:
+    assert manifest_input_default("require-policy") == "false"
+
+
+def test_every_input_the_script_reads_is_wired_into_the_step_env() -> None:
+    """An input read here but not passed through action.yml is silently always its default."""
+    manifest = Path(__file__).resolve().parents[1] / "action.yml"
+    script = (Path(__file__).resolve().parents[1] / "scripts" / "evalshift_action.py").read_text(
+        encoding="utf-8"
+    )
+    wired = manifest.read_text(encoding="utf-8")
+    read = set(re.findall(r'_(?:bool_)?input\(\s*source,\s*"([A-Z_]+)"', script))
+
+    assert read
+    assert [name for name in sorted(read) if f"INPUT_{name}:" not in wired] == []
+
+
 def test_policy_mode_survives_a_status_it_has_never_heard_of() -> None:
     """The server's status vocabulary grows; an older action must not crash or call it green."""
     result = action.evaluate_gating(
@@ -902,6 +1041,21 @@ def test_comment_does_not_caveat_a_plain_pass() -> None:
     assert "`pass`" in body
     assert "caveat" not in body
     assert "could not decide" not in body
+
+
+def test_comment_says_nothing_gates_the_pr_when_no_policy_was_pushed() -> None:
+    """An absent policy is not a policy that reached no verdict; the comment must not blur them."""
+    gating = action.evaluate_gating(
+        CLEAN_DIFF,
+        "policy",
+        policy=_policy_payload("inconclusive", policy_source="none", budgets=[]),
+    )
+
+    body = _policy_comment(gating, CLEAN_DIFF)
+
+    assert "Nothing gates this PR" in body
+    assert "migration_policy" in body
+    assert "reached no verdict" not in body
 
 
 def test_comment_announces_a_policy_fallback() -> None:
@@ -1643,6 +1797,7 @@ def _policy_main(
     *,
     payload: dict[str, Any],
     failure: Exception | None = None,
+    env: dict[str, str] | None = None,
 ) -> int:
     _preflight_workspace(tmp_path)
     FakePolicyHostedClient.payload = payload
@@ -1660,6 +1815,8 @@ def _policy_main(
             monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("INPUT_TOKEN", "es_secret")
     monkeypatch.setenv("INPUT_EVALSHIFT_VERSION", "1.2.3")
+    for key, value in (env or {}).items():
+        monkeypatch.setenv(key, value)
     return action.main()
 
 
@@ -1718,6 +1875,37 @@ def test_main_does_not_fail_the_job_on_an_all_insufficient_run(
     out = capsys.readouterr().out
     assert exit_code == 0
     assert reason in out
+
+
+def test_main_annotates_but_passes_a_run_that_carried_no_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code = _policy_main(
+        monkeypatch,
+        tmp_path,
+        payload=_policy_payload("inconclusive", policy_source="none", budgets=[]),
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "::warning" in out
+    assert "the gate is off" in out
+
+
+def test_main_fails_a_run_that_carried_no_policy_when_require_policy_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    exit_code = _policy_main(
+        monkeypatch,
+        tmp_path,
+        payload=_policy_payload("inconclusive", policy_source="none", budgets=[]),
+        env={"INPUT_REQUIRE_POLICY": "true"},
+    )
+
+    assert exit_code == 1
 
 
 def test_main_warns_and_falls_back_when_the_policy_check_is_unreachable(

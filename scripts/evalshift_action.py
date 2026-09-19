@@ -81,6 +81,34 @@ POLICY_DECIDED_STATUSES = frozenset({"pass", "conditional_pass", "fail"})
 # and the `reason` is where the server says what to look at.
 POLICY_CAVEATED_STATUSES = frozenset({"conditional_pass"})
 
+# The `policy_source` the server reports when the run was pushed carrying no migration policy.
+# It answers `inconclusive` for that, exactly as it does for a policy that weighed the run and
+# could not decide -- so the source is the only thing separating "nothing gates this PR" from
+# "the gate reached no verdict", and the two want opposite words: a configuration gap with a
+# one-line fix, versus a real answer about this run.
+POLICY_SOURCE_NONE = "none"
+
+NO_POLICY_SUMMARY = (
+    "the gate is off — no migration policy was pushed with this run; "
+    "add migration_policy to evalshift.yaml"
+)
+
+# What `require-policy: true` turns that sentence into. Separate wording because "the gate is
+# off" describes a job that merged, and this one describes the job it just blocked.
+NO_POLICY_REQUIRED_SUMMARY = (
+    "no migration policy was pushed with this run and require-policy is set; "
+    "add migration_policy to evalshift.yaml"
+)
+
+# GitHub scrapes workflow commands off the step's STDOUT only. `fetch_policy_check`'s fallback
+# warning goes to stderr because it is log text about one flaky request; this one has to reach
+# the job summary and the PR's Files view, because an ungated repository is invisible otherwise
+# -- every check is green and nothing says why.
+NO_POLICY_ANNOTATION = (
+    "::warning title=EvalShift policy gate::no migration policy was pushed with this run, "
+    "so nothing gates this PR; add migration_policy to evalshift.yaml and push again"
+)
+
 # A PR comment is not a dashboard. A policy with a per-slice budget for fifty slices would
 # otherwise bury the diff under its own table.
 MAX_BUDGET_ROWS = 12
@@ -128,6 +156,10 @@ class ActionConfig:
     create_project: bool
     comment: bool
     github_token: str
+    # Opt-in: fail the job when the run carried no migration policy. Off by default, because a
+    # repository that has never pushed a policy would otherwise go red on upgrading the action
+    # -- the annotation says the same thing without blocking anyone's merge.
+    require_policy: bool = False
     # Asserted by the workflow, not verified by EvalShift. Defaults to public: the server
     # records the first `true` permanently, so guessing `true` would be the costly guess.
     repo_private: bool = False
@@ -159,6 +191,7 @@ class ActionConfig:
             suite_name=suite_name,
             evalshift_version=evalshift_version,
             fail_on=fail_on,
+            require_policy=_bool_input(source, "REQUIRE_POLICY", False),
             branch=_input(source, "BRANCH", ""),
             base_branch=_input(source, "BASE_BRANCH", ""),
             create_project=_bool_input(source, "CREATE_PROJECT", True),
@@ -230,6 +263,11 @@ class GatingResult:
     def policy_decided(self) -> bool:
         """Whether the policy returned a status this action knows how to act on."""
         return self.policy_status in POLICY_DECIDED_STATUSES
+
+    @property
+    def policy_ungated(self) -> bool:
+        """Whether this run carried no policy at all -- an absent gate, not an undecided one."""
+        return self.policy_status == "inconclusive" and self.policy_source == POLICY_SOURCE_NONE
 
     @property
     def policy_caveated(self) -> bool:
@@ -869,6 +907,7 @@ def evaluate_gating(
     *,
     policy: dict[str, Any] | None = None,
     policy_unavailable: str = "",
+    require_policy: bool = False,
 ) -> GatingResult:
     """Decide whether this job fails, and record why.
 
@@ -893,6 +932,7 @@ def evaluate_gating(
             policy_unavailable,
             regression_count=regression_count,
             top_slice_regressions=top_slice_regressions,
+            require_policy=require_policy,
         )
     should_fail = False
     if fail_on == "regression":
@@ -914,8 +954,15 @@ def _policy_gating(
     *,
     regression_count: int,
     top_slice_regressions: list[dict[str, Any]],
+    require_policy: bool = False,
 ) -> GatingResult:
-    """Turn a ``policy-check`` response into a gate decision, or degrade loudly without one."""
+    """Turn a ``policy-check`` response into a gate decision, or degrade loudly without one.
+
+    ``require_policy`` is the ``require-policy`` input, and it governs exactly one case: a run
+    pushed with no policy at all. It is never a second opinion on a verdict the policy did
+    reach, and it says nothing about a policy check that could not be read -- that is the
+    fallback path above, which already refuses to go quietly green.
+    """
     if policy is None:
         reason = policy_unavailable or "hosted EvalShift returned no policy decision"
         should_fail = regression_count > 0
@@ -932,8 +979,17 @@ def _policy_gating(
         )
     status = str(policy.get("status") or "").strip().lower()
     policy_reason = _text(policy.get("reason"))
-    source = _text(policy.get("policy_source")) or "the project's policy"
-    if status == "fail":
+    policy_source = _text(policy.get("policy_source"))
+    source = policy_source or "the project's policy"
+    # Not a verdict: the run carried no policy, so nothing was gated. Said in its own words
+    # because the shared `inconclusive` wording ("could not decide") describes an answer, and
+    # this is the absence of one -- with a fix the reader can apply in a single yaml key.
+    ungated = status == "inconclusive" and policy_source == POLICY_SOURCE_NONE
+    if ungated:
+        print(NO_POLICY_ANNOTATION)
+        should_fail = require_policy
+        summary = NO_POLICY_REQUIRED_SUMMARY if require_policy else NO_POLICY_SUMMARY
+    elif status == "fail":
         should_fail = True
         summary = f"the {source} gate failed"
     elif status == "pass":
@@ -955,7 +1011,11 @@ def _policy_gating(
             f"the {source} gate returned an unrecognized status '{status or 'missing'}'; "
             "treated as undecided, not as a pass"
         )
-    if policy_reason:
+    if policy_reason and not ungated:
+        # The ungated sentence is deliberately left alone. The server's reason for this case is
+        # the same instruction in other words, and the commit-status description it feeds is cut
+        # at 140 characters -- appending would push the fix off the end. The reason still travels
+        # verbatim into the PR comment through `policy_reason`.
         summary = f"{summary}: {policy_reason}"
     return GatingResult(
         conclusion="failure" if should_fail else "success",
@@ -967,7 +1027,7 @@ def _policy_gating(
         policy_status=status,
         policy_verdict=_text(policy.get("verdict")),
         policy_reason=policy_reason,
-        policy_source=_text(policy.get("policy_source")),
+        policy_source=policy_source,
         budgets=[item for item in _list_field(policy, "budgets") if isinstance(item, dict)],
         blocking_regressions=[
             item for item in _list_field(policy, "blocking_regressions") if isinstance(item, dict)
@@ -1062,7 +1122,16 @@ def _policy_sections(gating: GatingResult) -> list[str]:
         lines[-1] += f" (from `{gating.policy_source}`)"
     if gating.policy_reason:
         lines.append(f"**Why:** {gating.policy_reason}")
-    if gating.policy_caveated:
+    if gating.policy_ungated:
+        lines.extend(
+            [
+                "",
+                "> **Nothing gates this PR.** No migration policy was pushed with this run, so "
+                "this check reports the diff and stops there. Add `migration_policy` to "
+                "`evalshift.yaml` and push again — the policy travels with the run.",
+            ]
+        )
+    elif gating.policy_caveated:
         lines.extend(
             [
                 "",
@@ -1268,6 +1337,7 @@ def main() -> int:
             config.fail_on,
             policy=policy,
             policy_unavailable=policy_unavailable,
+            require_policy=config.require_policy,
         )
         if gating.summary:
             print(f"EvalShift gate: {gating.summary}")
