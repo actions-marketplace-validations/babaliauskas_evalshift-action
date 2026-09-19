@@ -175,9 +175,10 @@ confirmation prompt, which has no answer on a runner.
 | `config`            | no       | `evalshift.yaml`            | Path to your EvalShift config, relative to the repository root. Paths *inside* the config (prompt files, tools) resolve relative to the config file's own directory, so a config in a subdirectory works. |
 | `suite`             | no       | `golden.jsonl`              | Path to the golden JSONL suite, relative to the repository root. Selects a *file*: a suite that wires its own `evaluators:` block under `suites:` must be selected with `suite-name` instead, or it is scored with the top-level evaluators. Mutually exclusive with `suite-name`. |
 | `suite-name`        | no       | —                           | Name of a suite wired under `suites:` in `evalshift.yaml` (what `evalshift capture sync` writes). Prefer this over `suite`: it carries that suite's own evaluator block. Needs `evalshift-version` >= `0.14.0`. |
-| `evalshift-version` | no       | `1.0.0`                     | Exact EvalShift CLI version to install from PyPI. Pin this if you want run-to-run reproducibility across CLI releases. |
+| `evalshift-version` | no       | `1.0.1`                     | Exact EvalShift CLI version to install from PyPI. Pin this if you want run-to-run reproducibility across CLI releases. |
 | `python-version`    | no       | `3.12`                      | Python version used to install and run the CLI. |
 | `fail-on`           | no       | `policy`                    | Gating mode. See below. |
+| `require-policy`    | no       | `false`                     | Whether a run pushed without a `migration_policy` fails the job. By default such a run merges — it is reported as ungated, with a workflow warning and a commit status that says the gate is off. Only `fail-on: policy` consults this. |
 | `branch`            | no       | auto                        | Candidate branch name recorded on the hosted run. Auto-detected from the PR head ref, else the pushed ref. Override only when your branch naming differs from the git ref. |
 | `base-branch`       | no       | auto                        | Branch to look for a baseline run on. Auto-detected from the PR base ref, else the current ref. If this resolves to empty, no baseline is fetched and the check always passes. |
 | `create-project`    | no       | `true`                      | Whether `evalshift push` may auto-create the hosted project when it does not exist yet. Set `false` to make a missing project a hard failure instead. |
@@ -189,25 +190,32 @@ confirmation prompt, which has no answer on a runner.
 
 | Mode                   | Job fails when |
 | ---------------------- | -------------- |
-| `policy`               | Hosted EvalShift evaluates the run against your project's migration policy and answers `fail`. **This is the default.** |
+| `policy`               | Hosted EvalShift evaluates the run against the migration policy it was pushed with — the `migration_policy` block of your `evalshift.yaml` — and answers `fail`. **This is the default.** |
 | `never`                | Never. Records the run and reports, but never blocks the merge. Use while you are still calibrating a suite. |
 | `regression`           | The hosted diff reports one or more regressed examples in aggregate. |
 | `any-slice-regression` | Any slice's pass rate moved down, even when the aggregate is flat or improved. Stricter — catches a specific slice degrading while overall numbers hide it. |
 
 `policy` is the only mode that gates on what you actually configured. The other
 three ask the action's own question about the diff, which can disagree with your
-policy in both directions. The decision comes from
-`GET /runs/{id}/policy-check`, so the CLI, the web app and this check all
-enforce one policy — the action never re-implements a threshold.
+policy in both directions. What it gates on is the `migration_policy` block in
+your `evalshift.yaml`: the CLI resolves it, `evalshift push` carries it along
+with the run, and `GET /runs/{id}/policy-check` answers from that snapshot. Your
+local `evalshift compare`, the run's Policy tab and this check therefore read one
+policy, written down in one place — the action never re-implements a threshold.
+A run pushed without a `migration_policy` has nothing to gate on; see the `none`
+row below.
 
-The policy answers with one of four statuses. Only one of them fails the job:
+The policy answers with one of four statuses. Only one of them fails the job —
+and `inconclusive` reads two ways, depending on whether there was a policy at
+all:
 
 | Status | Gate | What it means |
 | ------ | ---- | ------------- |
 | `pass` | merges | Every budget is within policy. |
 | `conditional_pass` | merges | Every budget held and nothing critical or high regressed, but medium/low regressions and/or comparisons that scored zero pairs came with it. A pass with caveats — deliberately **not** a gate failure. The comment says so and prints the server's reason; read it before merging. |
 | `fail` | **blocks** | A budget was busted, or a critical/high regression is blocking. |
-| `inconclusive` | merges | The policy could not decide. Never rendered as a pass — the comment and the commit status say the gate did not decide. Six different causes produce this — including a project with no policy configured at all, and a run in which no blocking evaluator scored a single record — and only the server's `reason` string tells them apart, so the action prints that reason verbatim rather than paraphrasing it. |
+| `inconclusive` | merges | The policy could not decide. Never rendered as a pass — the comment and the commit status say the gate did not decide. Several causes produce this — a run in which no blocking evaluator scored a single record, a budget breached on too small a sample to confirm it, a slice the policy declares that this run never measured — and only the server's `reason` string tells them apart, so the action prints that reason verbatim rather than paraphrasing it. |
+| `inconclusive` with `policy_source: none` | merges | **Nothing gates this PR.** The run carried no migration policy, so there was no gate to run — not a policy that looked and could not decide. The action prints a `::warning::` workflow annotation, says so in the commit status, and asks for the fix in the PR comment: add `migration_policy` to `evalshift.yaml` and push again. Set `require-policy: true` to make this a job failure instead. |
 
 Any status outside those four is something a newer server grew that this pinned
 version of the action has never seen. It is handled like `inconclusive`: it does
@@ -266,8 +274,8 @@ run — the gate still works.
    CLI versions older than the rename. Run it as `evalshift compare` locally.
 4. Pushes the completed run to hosted EvalShift, creating the project if needed.
 5. Asks the hosted API for a compatible baseline run on the base branch,
-   fetches the diff, and — under `fail-on: policy` — asks the server to judge
-   the run against the project's migration policy.
+   fetches the diff, and — under `fail-on: policy` — asks the server for the
+   verdict on the run, judged against the migration policy it was pushed with.
 6. Writes the outputs, upserts a single PR comment (marked so it updates in place
    instead of stacking), and sets the `evalshift/regression` commit status.
 7. Exits non-zero when the gate says so — the hosted policy verdict under `fail-on: policy`, the diff otherwise.

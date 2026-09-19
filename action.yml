@@ -36,7 +36,7 @@ inputs:
   evalshift-version:
     description: EvalShift CLI version to install.
     required: false
-    default: "1.0.0"
+    default: "1.0.1"
   python-version:
     description: Python version for the EvalShift CLI.
     required: false
@@ -45,6 +45,13 @@ inputs:
     description: "Gating mode: policy, never, regression, or any-slice-regression."
     required: false
     default: policy
+  require-policy:
+    description: >-
+      Whether a run pushed without a migration policy fails the job. Default false: such a
+      run is reported as ungated with a workflow warning and still merges. Applies to
+      'fail-on: policy' only.
+    required: false
+    default: "false"
   branch:
     description: Candidate branch override. Auto-detected when omitted.
     required: false
@@ -115,6 +122,7 @@ runs:
         INPUT_SUITE_NAME: ${{ inputs.suite-name }}
         INPUT_EVALSHIFT_VERSION: ${{ inputs.evalshift-version }}
         INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_REQUIRE_POLICY: ${{ inputs.require-policy }}
         INPUT_BRANCH: ${{ inputs.branch }}
         INPUT_BASE_BRANCH: ${{ inputs.base-branch }}
         INPUT_CREATE_PROJECT: ${{ inputs.create-project }}
